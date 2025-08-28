@@ -19,8 +19,8 @@ python sample_ddim.py \
     --sample_img_from_noise_pair \
     --sample_img_noise_pair_path "$output_dir" \
     --num_images 50000 \
-    --num_procs 3 \
-    --gpus cuda:5,cuda:6,cuda:7 \
+    --num_procs 2 \
+    --gpus cuda:3, cuda:4 \
     --steps "$step" ## DDIM sampling steps
 
 echo "[inferencing]"
