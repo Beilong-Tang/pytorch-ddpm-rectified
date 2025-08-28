@@ -23,6 +23,7 @@ FLAGS = flags.FLAGS
 flags.DEFINE_bool('train', False, help='train from scratch')
 flags.DEFINE_bool('eval', False, help='load ckpt.pt and evaluate FID and IS')
 flags.DEFINE_integer('steps', 100, help = "DDIM steps")
+flags.DEFINE_bool("use_training_noise", False, help="whether to use training noise")
 # Sample related 
 flags.DEFINE_bool('sample_img_from_noise_pair', False, help='load ckpt.pt and generate sample noise pairs')
 flags.DEFINE_list("gpus", ["cuda:1", "cuda:2", "cuda3", "cuda:4"], help = "gpus for inference")
@@ -70,21 +71,35 @@ from argparse import Namespace
 class AttrDict(Namespace):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-
     def __getattribute__(self, name: str):
         try:
             return super().__getattribute__(name)
         except AttributeError:
             return None
-
     def __getitem__(self, key):
         return self.__getattribute__(key)
+
+def read_scp(scp_path):
+    res = []
+    with open(scp_path, "r") as f:
+        for l in f.readlines():
+            res.append(l.replace("\n","").split(" ")[-1])
+    return res
 
 def sample_img_from_noise_pair(rank, config):
     def evaluate_img_noise_pair(num_images, sampler, model, device, config,  rank = 0):
         model.eval()
         ct = 0
         batch_size = config.batch_size // config.num_procs
+
+        noise_scp:str = config.noise_scp
+        use_noise:bool = config.use_training_noise
+        if use_noise:
+            noise_paths = read_scp(noise_scp)
+            noise_paths = noise_paths[rank::config.num_procs]
+            print(f"rank {rank} got noises {len(noise_paths)} from noise scp")
+            num_images = len(noise_paths)
+        
         with torch.no_grad():
             desc = f"generating image and noise pairs of num {num_images} on rank {rank}"
             if rank == 0:
@@ -93,7 +108,15 @@ def sample_img_from_noise_pair(rank, config):
                 pbar = range(0, num_images, batch_size)
             for i in pbar:
                 batch_size = min(batch_size, num_images - i)
-                x_T = torch.randn((batch_size, 3, config.img_size, config.img_size))
+                if use_noise:
+                    noises = noise_paths[i:i+batch_size]
+                    x_T = []
+                    for _i in noises:
+                        _n = torch.from_numpy(np.load(_i))# [3, H, W]
+                        x_T.append(_n)
+                    x_T = torch.stack(x_T, dim = 0) # [B, 3, H, W]
+                else:
+                    x_T = torch.randn((batch_size, 3, config.img_size, config.img_size))
                 batch_images = sampler(x_T.to(device), steps = config.steps).cpu()
                 batch_images = (batch_images + 1) / 2
                 images = batch_images.numpy() # [B, 3, H, W]
@@ -126,7 +149,9 @@ def sample_img_from_noise_pair(rank, config):
     ckpt = torch.load(os.path.join(config.logdir, 'ckpt.pt'), map_location='cpu')
     model.load_state_dict(ckpt['ema_model'])
 
-    evaluate_img_noise_pair(num_imgs, sampler, model, device, config,  rank = rank) # [N, 3, H, W], # [N, 3, H, W]
+
+
+    evaluate_img_noise_pair(num_imgs, sampler, model, device, config, rank = rank) # [N, 3, H, W], # [N, 3, H, W]
 
 def main(argv):
     # suppress annoying inception_v3 initialization warning

@@ -11,17 +11,20 @@ set -o pipefail
 # Sample
 echo "[sampling]"
 step=100
-output_dir=output/DDPM_CIFAR10_EPS_RECTIFIED_400000_ode_ddim_step_$step
+output_dir=output/DDPM_CIFAR10_EPS_RECTIFIED_400000_ode_ddim_step_${step}_train_noise
+train_noise_scp=/home/btang5/work/2025/pytorch-ddpm/sample_pairs/img_from_noise_pair/pretrained_ckpt/noise.scp
 python sample_ddim.py \
     --flagfile logs/DDPM_CIFAR_10_EPS_RECTIFIED/flagfile.txt \
     --logdir logs/DDPM_CIFAR_10_EPS_RECTIFIED \
-    --batch_size 48 \
+    --batch_size 80 \
     --sample_img_from_noise_pair \
     --sample_img_noise_pair_path "$output_dir" \
     --num_images 50000 \
-    --num_procs 2 \
-    --gpus "cuda:3,cuda:4" \
-    --steps "$step" ## DDIM sampling steps
+    --num_procs 5 \
+    --gpus "cuda:3,cuda:4,cuda:5,cuda:6,cuda:7" \
+    --steps "$step" \
+    --noise_scp "$train_noise_scp"\
+    --use_training_noise 
 
 echo "[inferencing]"
 # Inferencsse
