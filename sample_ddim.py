@@ -14,7 +14,7 @@ from torchvision.utils import make_grid, save_image
 from torchvision import transforms
 from tqdm import trange
 
-from diffusion import GaussianDiffusionTrainer, GaussianDiffusionSampler
+from diffusion import GaussianDiffusionTrainer, DDIMSampler
 from model import UNet
 from score.both import get_inception_and_fid_score
 
@@ -22,7 +22,7 @@ from score.both import get_inception_and_fid_score
 FLAGS = flags.FLAGS
 flags.DEFINE_bool('train', False, help='train from scratch')
 flags.DEFINE_bool('eval', False, help='load ckpt.pt and evaluate FID and IS')
-flags.DEFINE_bool("no_noise", False, help = "whether to add noise (SDE or ODE). If no noise is True, then it means ODE")
+flags.DEFINE_integer('steps', 100, help = "DDIM steps")
 # Sample related 
 flags.DEFINE_bool('sample_img_from_noise_pair', False, help='load ckpt.pt and generate sample noise pairs')
 flags.DEFINE_list("gpus", ["cuda:1", "cuda:2", "cuda3", "cuda:4"], help = "gpus for inference")
@@ -81,21 +81,25 @@ class AttrDict(Namespace):
         return self.__getattribute__(key)
 
 def sample_img_from_noise_pair(rank, config):
-    def evaluate_img_noise_pair(num_images, sampler, model, device, config, add_noise, rank = 0):
+    def evaluate_img_noise_pair(num_images, sampler, model, device, config,  rank = 0):
         model.eval()
         ct = 0
         batch_size = config.batch_size // config.num_procs
         with torch.no_grad():
             desc = f"generating image and noise pairs of num {num_images} on rank {rank}"
-            for i in trange(0, num_images, batch_size, desc=desc):
+            if rank == 0:
+                pbar = trange(0, num_images, batch_size, desc=desc, dynamic_ncols=True)
+            else:
+                pbar = range(0, num_images, batch_size)
+            for i in pbar:
                 batch_size = min(batch_size, num_images - i)
                 x_T = torch.randn((batch_size, 3, config.img_size, config.img_size))
-                batch_images = sampler(x_T.to(device), add_noise=add_noise).cpu()
+                batch_images = sampler(x_T.to(device), steps = config.steps).cpu()
                 batch_images = (batch_images + 1) / 2
                 images = batch_images.numpy() # [B, 3, H, W]
                 noises = x_T.numpy() # [B, 3, H, W]
                 # save images and noises
-                for _img, _noise in zip(images, noises):
+                for _img, _noise in tqdm.tqdm(zip(images, noises), disable=True):
                     np.save(os.path.join(config.sample_img_noise_pair_path, "images_npy", f"r_{rank:02d}_{ct:06d}.npy"), _img)
                     np.save(os.path.join(config.sample_img_noise_pair_path, "noises", f"r_{rank:02d}_{ct:06d}.npy"), _noise)
                     _img = (_img * 255).clip(0, 255).astype(np.uint8)
@@ -116,16 +120,13 @@ def sample_img_from_noise_pair(rank, config):
     model = UNet(
         T=config.T, ch=config.ch, ch_mult=config.ch_mult, attn=config.attn,
         num_res_blocks=config.num_res_blocks, dropout=config.dropout)
-    sampler = GaussianDiffusionSampler(
-        model, config.beta_1, config.beta_T, config.T, img_size=config.img_size,
-        mean_type=config.mean_type, var_type=config.var_type).to(device)
+    sampler = DDIMSampler(
+        model, [config.beta_1, config.beta_T], config.T).to(device)
     # load model and evaluate
     ckpt = torch.load(os.path.join(config.logdir, 'ckpt.pt'), map_location='cpu')
     model.load_state_dict(ckpt['ema_model'])
 
-    add_noise = not config.no_noise
-    print(f"Add noise: {add_noise}")
-    evaluate_img_noise_pair(num_imgs, sampler, model, device, config, add_noise= add_noise, rank = rank) # [N, 3, H, W], # [N, 3, H, W]
+    evaluate_img_noise_pair(num_imgs, sampler, model, device, config,  rank = rank) # [N, 3, H, W], # [N, 3, H, W]
 
 def main(argv):
     # suppress annoying inception_v3 initialization warning
