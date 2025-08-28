@@ -10,8 +10,8 @@ set -o pipefail
 
 # Sample
 echo "[sampling]"
-step=100
-output_dir=output/DDPM_CIFAR10_EPS_RECTIFIED_400000_ode_ddim_step_${step}_train_noise
+step=25
+output_dir=output/rectified/DDPM_CIFAR10_EPS_RECTIFIED_400000_ode_ddim_step_${step}_train_noise
 train_noise_scp=/home/btang5/work/2025/pytorch-ddpm/sample_pairs/img_from_noise_pair/pretrained_ckpt/noise.scp
 python sample_ddim.py \
     --flagfile logs/DDPM_CIFAR_10_EPS_RECTIFIED/flagfile.txt \
