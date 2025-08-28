@@ -8,7 +8,7 @@ set -o pipefail
 
 # Sample
 echo "[sampling]"
-output_dir=output/DDPM_CIFAR10_EPS_RANDOM_400000
+output_dir=output/DDPM_CIFAR10_EPS_RANDOM_400000_ode_ddim_step_100
 python sample.py \
     --flagfile logs/DDPM_CIFAR_10_EPS_RANDOM/flagfile.txt \
     --logdir logs/DDPM_CIFAR_10_EPS_RANDOM \
@@ -16,8 +16,8 @@ python sample.py \
     --sample_img_from_noise_pair \
     --sample_img_noise_pair_path "$output_dir" \
     --num_images 50000 \
-    --num_procs 8 \
-    --gpus cuda:0,cuda:1,cuda:2,cuda:3,cuda:4,cuda:5,cuda:6,cuda:7
+    --num_procs 5 \
+    --gpus cuda:3,cuda:4,cuda:5,cuda:6,cuda:7
 
 echo "[inferencing]s"
 # Inference
