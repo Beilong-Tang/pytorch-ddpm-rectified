@@ -11,14 +11,20 @@ from torchvision.utils import make_grid, save_image
 from torchvision import transforms
 from tqdm import trange
 
-from diffusion import GaussianDiffusionTrainer, GaussianDiffusionSampler
+from diffusion import GaussianDiffusionSampler, MatchedGaussianDiffusionTrainer, GaussianDiffusionTrainer
 from model import UNet
 from score.both import get_inception_and_fid_score
-
+from dataset import ImageNoisePairDataset
+import tqdm  
 
 FLAGS = flags.FLAGS
 flags.DEFINE_bool('train', False, help='train from scratch')
 flags.DEFINE_bool('eval', False, help='load ckpt.pt and evaluate FID and IS')
+## Newly added
+flags.DEFINE_string("noise_scp", default = None, help = "path to noise scp")
+flags.DEFINE_string("img_scp", default = None, help = "path to noise scp")
+
+
 # UNet
 flags.DEFINE_integer('ch', 128, help='base channel of UNet')
 flags.DEFINE_multi_integer('ch_mult', [1, 2, 2, 2], help='channel multiplier')
@@ -55,19 +61,16 @@ flags.DEFINE_string('fid_cache', './stats/cifar10.train.npz', help='FID cache')
 device = torch.device('cuda:0')
 
 
-def ema(source, target, decay):
-    source_dict = source.state_dict()
-    target_dict = target.state_dict()
-    for key in source_dict.keys():
-        target_dict[key].data.copy_(
-            target_dict[key].data * decay +
-            source_dict[key].data * (1 - decay))
+@torch.no_grad()
+def ema(source, target, decay: float = 0.999):
+    for src_param, tgt_param in zip(source.parameters(), target.parameters()):
+        tgt_param.data.mul_(decay).add_(src_param.data, alpha=1 - decay)
 
 
 def infiniteloop(dataloader):
     while True:
         for x, y in iter(dataloader):
-            yield x
+            yield x, y
 
 
 def warmup_lr(step):
@@ -91,20 +94,38 @@ def evaluate(sampler, model):
         use_torch=FLAGS.fid_use_torch, verbose=True)
     return (IS, IS_std), FID, images
 
+@torch.no_grad()
+def evaluate_noise_mse(trainer, dataloader, model):
+    model.eval()
+    total_mse_loss = 0 
+    ct = 0
+    for _i, _ in tqdm.tqdm(dataloader, desc="evaluation"):
+        mse_score = trainer(_i.to(device)).mean().cpu().item()
+        total_mse_loss += mse_score
+        ct+=1
+    total_mse_loss = total_mse_loss / ct
+    model.train()
+    return total_mse_loss
+
 
 def train():
     # dataset
-    dataset = CIFAR10(
-        root='./data', train=True, download=True,
-        transform=transforms.Compose([
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
-        ]))
+    dataset = ImageNoisePairDataset(img_scp = FLAGS.img_scp, noise_scp=FLAGS.noise_scp)
     dataloader = torch.utils.data.DataLoader(
         dataset, batch_size=FLAGS.batch_size, shuffle=True,
         num_workers=FLAGS.num_workers, drop_last=True)
     datalooper = infiniteloop(dataloader)
+
+    eval_dataset = CIFAR10(
+        root='./data', train=False, download=True,
+        transform=transforms.Compose([
+            transforms.ToTensor(),
+            transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+    ]))
+    eval_dataloder = torch.utils.data.DataLoader(
+        eval_dataset, batch_size=FLAGS.batch_size, shuffle=False,
+        num_workers=FLAGS.num_workers, drop_last=True
+    )
 
     # model setup
     net_model = UNet(
@@ -113,7 +134,9 @@ def train():
     ema_model = copy.deepcopy(net_model)
     optim = torch.optim.Adam(net_model.parameters(), lr=FLAGS.lr)
     sched = torch.optim.lr_scheduler.LambdaLR(optim, lr_lambda=warmup_lr)
-    trainer = GaussianDiffusionTrainer(
+    trainer = MatchedGaussianDiffusionTrainer(
+        net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T).to(device)
+    evaluator = GaussianDiffusionTrainer(
         net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T).to(device)
     net_sampler = GaussianDiffusionSampler(
         net_model, FLAGS.beta_1, FLAGS.beta_T, FLAGS.T, FLAGS.img_size,
@@ -125,6 +148,7 @@ def train():
         trainer = torch.nn.DataParallel(trainer)
         net_sampler = torch.nn.DataParallel(net_sampler)
         ema_sampler = torch.nn.DataParallel(ema_sampler)
+        raise Exception("No parallel! The parallel needs to be modified")
 
     # log setup
     os.makedirs(os.path.join(FLAGS.logdir, 'sample'))
@@ -148,8 +172,9 @@ def train():
         for step in pbar:
             # train
             optim.zero_grad()
-            x_0 = next(datalooper).to(device)
-            loss = trainer(x_0).mean()
+            x_0, eps = next(datalooper)
+            x_0, eps = x_0.to(device), eps.to(device)
+            loss = trainer(x_0, eps).mean()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(
                 net_model.parameters(), FLAGS.grad_clip)
@@ -187,15 +212,11 @@ def train():
 
             # evaluate
             if FLAGS.eval_step > 0 and step % FLAGS.eval_step == 0:
-                net_IS, net_FID, _ = evaluate(net_sampler, net_model)
-                ema_IS, ema_FID, _ = evaluate(ema_sampler, ema_model)
+                mse_loss = evaluate_noise_mse(evaluator, eval_dataloder, ema_model)
+                # net_IS, net_FID, _ = evaluate(net_sampler, net_model)
+                # ema_IS, ema_FID, _ = evaluate(ema_sampler, ema_model)
                 metrics = {
-                    'IS': net_IS[0],
-                    'IS_std': net_IS[1],
-                    'FID': net_FID,
-                    'IS_EMA': ema_IS[0],
-                    'IS_std_EMA': ema_IS[1],
-                    'FID_EMA': ema_FID
+                    'eval_mse_loss': mse_loss
                 }
                 pbar.write(
                     "%d/%d " % (step, FLAGS.total_steps) +
@@ -244,4 +265,4 @@ def main(argv):
 
 
 if __name__ == '__main__':
-    app.run(main)
+    app.run(main, flags_parser=app.parse_flags_with_usage)
